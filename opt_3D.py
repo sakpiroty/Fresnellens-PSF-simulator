@@ -52,7 +52,6 @@ black_base, white_base = 0, 1 #マスクの最大透過率
 df = pd.read_csv("./data/womask_intensity_depth.csv")
 ref_intensity = torch.tensor(df[["0", "1", "2","3","4", "5", "6","7", "8", "9","10"]].values, dtype=torch.float32, device = device).t()
 
-
 def save_tensorimage(tensor, min, max, filepath):
     # テンソルが2次元であることを確認
     if tensor.ndim != 2:
@@ -70,15 +69,14 @@ def save_tensorimage(tensor, min, max, filepath):
     Image.fromarray(tensor_uint8.cpu().numpy()).save(filepath)
 
 ## 本来の正規化
-def prev_normalize_image(img):
+def max_normalize_image(img):
     img_max = img.max()
     return img / img_max
 
-### 提案する正規化
 def normalize_image(img):
     img_max = img.max()
     img_min = img.min()
-    return (img - img_min) / (img_max- img_min)
+    return (img -img_min) / (img_max-img_min)
 
 def save_loss_logger_and_graph(log_dir, loss_logger):
     # loss履歴情報を保管しつつ、グラフにして画像としても書き出す
@@ -91,95 +89,6 @@ def save_loss_logger_and_graph(log_dir, loss_logger):
     fig.savefig(os.path.join(log_dir, "./log/loss_history.jpg"))
     plt.clf()
     plt.close()
-
-
-###
-####　目標MTF画像の作成
-### 
-# CSF計算 (Mannos-Sakrison model)
-def csf(f):
-    """ コントラスト感度関数（CSF）のモデル """
-    # C0 = 1.5  # 正規化係数
-    # alpha = 0.2  # 周波数減衰係数
-    # return C0 * f * torch.exp(-alpha * f)
-    return 2.6 * (0.0192 + 0.114 * f) * torch.exp(- torch.pow(0.114*f, 1.1))
-
-def calc_targetmtf(object_z, pix_size):
-    # 画像の物理サイズ (mm)
-    W = PSFSIZE * pix_size
-
-    # 画像の視角 (度)
-    theta = (2 * torch.rad2deg(torch.arctan(W / (2 * object_z)))).to(device)
-
-    # 空間周波数軸 (サイクル/mm と サイクル/度)
-    freqs_mm = torch.fft.fftfreq(PSFSIZE, d=pix_size).to(device)  # 物理周波数 (cycle/mm)
-    freqs_deg = freqs_mm * (W / theta)  # 視角周波数 (cycle/degree)
-
-    # Torch tensorsでの実装
-    u, v = torch.meshgrid(freqs_deg, freqs_deg, indexing='ij')
-    freq_map = torch.sqrt(u**2 + v**2)
-
-    # 目標MTF (正規化)
-    target_mtf = csf(freq_map)
-    target_mtf = torch.fft.fftshift(target_mtf)
-    target_mtf = normalize_image(target_mtf).to(device)  # 最大値を1に正規化
-
-    return target_mtf
-
-def morans_I(image: torch.Tensor) -> float:
-    """
-    Compute Moran's I for a grayscale image tensor,
-    restricted to a circular region centered in the image.
-
-    Args:
-        image (torch.Tensor): 2D tensor of shape (H, W), with float values.
-
-    Returns:
-        float: Moran's I statistic
-    """
-    if image.dim() != 2:
-        raise ValueError("Input image must be a 2D tensor.")
-
-    H, W = image.shape
-    N = H * W
-    x = image
-
-    # Create circular mask
-    Y, X = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-    center_y, center_x = H / 2, W / 2
-    radius = min(H, W) / 2
-    circular_mask = (((X - center_x)**2 + (Y - center_y)**2) <= radius**2).to(device)
-
-    # Mean over the circular region only
-    x_bar = x[circular_mask].mean()
-
-    # Weight matrix using 4-neighbor connectivity
-    kernel = torch.tensor([[0.0, 1.0, 0.0],
-                           [1.0, 0.0, 1.0],
-                           [0.0, 1.0, 0.0]], dtype=torch.float32, device = device).unsqueeze(0).unsqueeze(0)
-
-    # Center the image
-    x_centered = x - x_bar
-    x_centered = x_centered.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, H, W)
-
-    # Convolve to compute spatial lag (weighted sum of neighbors)
-    spatial_lag = F.conv2d(x_centered, kernel, padding=1)
-
-    # Compute valid weights with same kernel
-    mask = circular_mask.float()
-    weight_sum = F.conv2d(mask.unsqueeze(0).unsqueeze(0), kernel, padding=1).squeeze()
-
-    valid = (weight_sum > 0) & circular_mask
-
-    numerator = (x_centered.squeeze() * spatial_lag.squeeze())[valid].sum()
-    denominator = (x_centered.squeeze() ** 2)[circular_mask].sum()
-    W = weight_sum[valid].sum()
-    N_valid = circular_mask.sum()
-
-    I = (N_valid / W) * (numerator / denominator)
-    return I
-
-
 
 def nanvar(tensor, dim=None, keepdim=False):
     tensor_mean = torch.nanmean(tensor)
@@ -635,13 +544,6 @@ class LensSystem:
         adj_pixel_size = pixel_size * MAGNIFY
         pix_world_xys = (p - targetloc[psfloc, :]) / adj_pixel_size
         result_xys = (p - targetloc[psfloc, :]) / adj_pixel_size
-        # print(torch.cuda.memory_allocated())
-        # del ray, origin_inMASKpixel, x_index, y_index, tmp_intensity 
-        # torch.cuda.empty_cache()
-        # print(torch.cuda.memory_allocated())
-
-        # Target MTFの計算
-        target_mtf = calc_targetmtf(object_z, adj_pixel_size)
 
         # WORLD 座標から 画像座標への変換
         result_xys[:,:,0] = -(pix_world_xys[:,:,1] - (PSFSIZE/2 - 1))
@@ -728,9 +630,9 @@ class LensSystem:
 
         save_tensorimage(psftensor, min = torch.min(psftensor), max = torch.max(psftensor), filepath = f"./psfs/optimized_keypoints_{psfloc+1}.png")
 
-        return psftensor, transmission, intensitymap, target_mtf
+        return psftensor, transmission, intensitymap
     
-    def optim_mask(self, tau):
+    def optim_mask(self, b):
         # # # 初期値　ランダムマスク
         # ini_mask = torch.randint(0, 2, (MASKSIZE, MASKSIZE), device = device, dtype = torch.float)
 
@@ -781,8 +683,8 @@ class LensSystem:
             regions[(radii[i] <= distance) & (radii[i+1] <= distance)] = i + 1
         regions.to(device)
 
-        if os.path.exists("./log/ray_behind_Fresnel_" + targetmodel + "_500ray.pt"):
-            ray_behind_Fresnel = torch.load("./log/ray_behind_Fresnel_" + targetmodel + "_500ray.pt", map_location=device)
+        if os.path.exists("./log/ray_behind_Fresnel_" + targetmodel + ".pt"):
+            ray_behind_Fresnel = torch.load("./log/ray_behind_Fresnel_" + targetmodel + ".pt", map_location=device, weights_only=False)
 
         else:
             ray_behind_Fresnel = []
@@ -806,114 +708,34 @@ class LensSystem:
 
                 psfloc = psflist[ite]
                 
-                # # x = torch.sigmoid(6 * (x - 0.5))
-                # if ((psfloc % 5) == 0):
-                #     if (firsttime == 1):
-                #         firsttime += 1
-                #     else:
-                #         print("Sigmoid")
-                #         x = torch.sigmoid(6 * (x - 0.5))
-
-                psftensor, transmission, intensitymap, target_mtf = self.simulatePSF(ray_behind_Fresnel[psfloc], mask = x, psfloc = psfloc)
+                psftensor, transmission, intensitymap = self.simulatePSF(ray_behind_Fresnel[psfloc], mask = x, psfloc = psfloc)
                 ref = self.simulatePSF(ray_behind_Fresnel[psfloc], mask = mask_open, psfloc = psfloc)
                 transmission_ref, intensitymap_ref = ref[1], ref[2]
-                # print(f'transmission_ref: {transmission_ref.item()}')
-                # reporter.report()
-
-                # save_tensorimage(psftensor, min = torch.min(psftensor), max = torch.max(psftensor),  filepath = f"{MASKSIZE}_withmaskPSF.png")
-
-                # # パッチごとに分割
-                # psfpatches = (
-                #     psftensor.unfold(0, int(PSFSIZE), int(PSFSIZE))  # 高さ方向に100ずつ分割
-                #         .unfold(1, int(PSFSIZE), int(PSFSIZE))  # 幅方向に100ずつ分割
-                # )
-                # psfpatches = psfpatches.contiguous().view(-1, int(PSFSIZE), int(PSFSIZE)) 
 
                 # PSFをフーリエ変換してMTFを取得
-                norm_psfpatch = prev_normalize_image(psftensor)
+                norm_psfpatch = max_normalize_image(psftensor)
                 fft_psfpatch = torch.fft.fft2(norm_psfpatch)  # フーリエ変換
                 fft_psfpatch = torch.fft.fftshift(fft_psfpatch)  # 中心を移動
                 magnitude_spectrum = torch.abs(fft_psfpatch)
 
                 #　正規化？
-                magnitude_spectrum = prev_normalize_image(magnitude_spectrum)
+                magnitude_spectrum = max_normalize_image(magnitude_spectrum)
 
                 # for i, spectrum in enumerate(magnitude_spectrums):
                 save_tensorimage(magnitude_spectrum, min = 0, max = torch.max(magnitude_spectrum), filepath = f"./MTF/{psfloc+1}.png")
 
-                # for i, spectrum in enumerate(magnitude_spectrums):
-                #     tmpspectrum = spectrum
-                #     ## 周波数0はロスに含めたくないのでカット
-                #     max_idx = torch.argmax(tmpspectrum)
-                #     # 2次元インデックスに変換 (行, 列)
-                #     max_row, max_col = divmod(max_idx.item(), tmpspectrum.shape[1])
-                #     magnitude_spectrums[i, max_row, max_col] = 0
-
-                # ロス1：振幅スペクトルの平均値を最大化
+                # ロス1:Broadband MTF
                 lossAveMTF = -magnitude_spectrum.mean()
 
-                # ロス2：振幅スペクトルの分散を最小化
-                lossVarMTF = magnitude_spectrum.var()
-
-                # ロス：TragetMTFとの誤差
-                ### 単純な MSE 
-                # lossMTF = torch.mean((target_mtf - magnitude_spectrum) * (target_mtf - magnitude_spectrum))
-                ### Target MTF に足りてない成分のみをロスに使用
-                lacked_freq = torch.clamp(target_mtf - magnitude_spectrum, min = 0)
-                lossMTF = torch.mean(lacked_freq)
-
-                # ロス3：光線透過率を最大化
-                # lossTRANS = ((transmission / transmission_ref) - 0.5)**2
-                # TRANS = (torch.mean(intensitymap) / torch.mean(intensitymap_ref))
-                # lossTRANS = -(1.0/(1+torch.exp(-100*(TRANS-tau))))
-                
-                # lossTRANS = -(TRANS)**(0.5)
+                # ロス2：transmission to 0.5 (tau)
                 lossTRANS = ((torch.mean(intensitymap) / torch.mean(intensitymap_ref)) - 0.5)**2
-                # print((transmission / transmission_ref))
-                # print((torch.sum(intensitymap) / torch.sum(intensitymap_ref)))
-                # lossTRANS = -intensitymap.mean()
-                
-                lossMean = -intensitymap.mean()
                 save_tensorimage(intensitymap, min = torch.min(intensitymap), max = torch.max(intensitymap), filepath = f"./intensitymap/intensitymap_{psfloc}.png")
-                # intensitymap = torch.where(intensitymap >= 0.1, intensitymap, float('nan'))
-                # nanmean = torch.nanmean(intensitymap)
 
-                # lossNanmean = -nanmean
-                # diff = torch.where(torch.isnan(intensitymap), torch.zeros_like(intensitymap), intensitymap - nanmean)
-                # lossNanStd = torch.sqrt (torch.sum(diff**2) / (torch.isnan(intensitymap)).sum())
-
-                # ロス4：intensitymap の同心円状領域間での絶対誤差
+                # ロス3：Shadow suppression
                 intensitymap = intensitymap / torch.max(intensitymap)
-                lossShadow = torch.tensor(0, device = device)
-                sums = torch.zeros(sep_mask, device = device)
-                for mask_i in range(sep_mask):
-                    sums[mask_i] = intensitymap[regions == mask_i].sum()
-                for i, s in enumerate(sums):
-                    lossShadow = lossShadow + torch.pow(s - (torch.sum(sums)/ sep_mask), 2)
-                
-                # # ロス5：intensitymap の 同心円状領域間での絶対誤差
-                # lossVarSS = sums.var()
-                
-                # ロス6：intensity map の極座標表現における theta 方向の高周波成分 OR 分散
-                grid = polar_grid().to(device)
-                polar_image = F.grid_sample(intensitymap.unsqueeze(0).unsqueeze(0), grid, align_corners=True)
-                # lossMapPolar = high_freq_loss(polar_image)
-                polar_image = polar_image.squeeze(0).squeeze(0)
-                save_tensorimage(polar_image, min = torch.min(polar_image), max = torch.max(polar_image), filepath = f"./polar/intensity_polar_{psfloc}.png")
-                lossMapPolar = torch.mean(torch.var(polar_image, dim = 0, unbiased = False)) + torch.mean(torch.var(polar_image, dim = 1, unbiased = False))
-
-                # # ロス7: Moran's I 空間的な散らばり
-                # loss_moran = morans_I(intensitymap)
-                # print(f"Moran: {loss_moran.item()}")
-                
-                # ロス8: intensitymap の中心から離れた画素ほど高い評価
                 lossSS = -torch.mean(intensitymap * distance_norm)
-                # print(lossSS.item())
 
-                # if (TRANS < 0.1 or TRANS > 0.9):
-                #     breaked = True
-                #     break
-                loss = lossAveMTF + 2 *lossTRANS + tau * lossSS # + 0.0001 * lossMean
+                loss = lossAveMTF + 2 *lossTRANS + b * lossSS # + 0.0001 * lossMean
                 loss.backward(retain_graph=True)
 
                 loss_logger.append(loss.item())
@@ -923,23 +745,21 @@ class LensSystem:
                 # x.where(~torch.isnan(inside), torch.tensor(0, device = device))
 
                 print(f"Epoch: {epoch+1}, Iter: {ite+1}, PSFLOC: {psfloc}, Loss: {loss.item():.4f}, AveMTF: {lossAveMTF.item():.4f}, TRANS: {lossTRANS.item():.4f}, SS: {lossSS.item():.4f}")#, LossVarSS: {lossVarSS.item():.4f},
-                del psftensor, norm_psfpatch, fft_psfpatch, magnitude_spectrum, transmission, lossAveMTF, lossVarMTF, lossTRANS, loss 
+                del psftensor, norm_psfpatch, fft_psfpatch, magnitude_spectrum, transmission, lossAveMTF, lossTRANS, lossSS, loss 
                 torch.cuda.empty_cache()
 
                 ### for now
-                save_tensorimage(x, min = 0, max = 1,  filepath = f"./optimized_mask/{MASKSIZE}_{tau}_forNow.png")
+                save_tensorimage(x, min = 0, max = 1,  filepath = f"./optimized_mask/{MASKSIZE}_{b}_forNow.png")
             
             ### for each epoch
             save_tensorimage(x, min = 0, max = 1,  filepath = f"./optimized_mask/{MASKSIZE}_initial_mask_{epoch+1}.png")
             if breaked:
                 break
 
-
         # Save the optimized image
         save_tensorimage(x, min = 0, max = 1, filepath =  f"./Result_optimized_mask_{MASKSIZE}.png")
 
-tau_list = [0.056, 0.057, 0.058, 0.059]
-# tau_list = [0.021, 0.022, 0.023,0.024,0.025,0.026,0.027,0.028,0.029]
-for tau in tau_list:
+b_list = [0, 0.1, 0.2]
+for b in b_list:
     lsys = LensSystem(['data/fresnel.csv'])
-    lsys.optim_mask(tau)
+    lsys.optim_mask(b)
