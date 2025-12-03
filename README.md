@@ -11,9 +11,11 @@ The conceptual diagram for the entire process of the aperture optimization.
 <img width="2462" height="1204" alt="image" src="https://github.com/user-attachments/assets/cdc1c6ee-6705-45bf-80c7-3804eeb88ae8" />
 
 ## Requirements
-Python 3 <br>
-Pillow <br>
-Torch <br>
+python 3.13 <br>
+torch 2.4.1 <br>
+torchvision 0.19.1 <br>
+pillow 10.4.0 <br>
+opencv-python 4.12.0.88 <br>
 
 ## How to Use
 
