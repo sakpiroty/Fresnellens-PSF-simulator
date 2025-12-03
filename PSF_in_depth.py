@@ -631,7 +631,7 @@ class LensSystem:
 
         # # ランダムマスクの場合
         # cond = "random"
-        # ini_mask = (Image.open(f"Mask_random64.png").convert("L"))
+        # ini_mask = (Image.open(f"Mask_random.png").convert("L"))
         # transform = transforms.Compose(
         #     [
         #         transforms.ToTensor(),
